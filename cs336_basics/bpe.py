@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from collections import Counter, defaultdict
 import multiprocessing as mp
 import regex as re
-from typing import BinaryIO
+from typing import BinaryIO, Iterable, Iterator
 
 
 def find_chunk_boundaries(
@@ -87,28 +87,84 @@ Vocab = dict[int, bytes]
 
 @dataclass
 class BPETokenizer:
-    id_to_bytes: Vocab
-    merges: list[BytePair]
-    special_tokens: list[str] | None = None
 
-    def __post_init__(self):
-        self.bytes_to_id = {b: i for i, b in self.id_to_bytes.items()}
+    def __init__(self, vocab: Vocab, merges: list[BytePair], special_tokens: list[str] | None = None):
+        self.vocab = vocab
+        self.merges = merges
+        self.special_tokens = special_tokens
+        self.bytes_to_id = {b: i for i, b in vocab}
         # Ranks: lower index = higher priority during merging
-        self.ranks = {pair: i for i, pair in enumerate(self.merges)}
+        self.ranks = {pair: i for i, pair in enumerate(merges)}
 
+    def from_files(cls, vocab_filepath: str, merges_filepath: str, special_tokens: list[str]=None):
+        """
+        Class method that constructs and return a Tokenizer from a serialized vocabulary and list of merges
+        (in the same format that your BPE training code output) and (optionally) a list of special
+        tokens.
+        """
+        import pickle
+        with open(vocab_filepath, "rb") as vf:
+            vocab: dict[int, bytes] = pickle.load(vf)
+        with open(merges_filepath, "rb") as mf:
+            merges: list[BytePair] = pickle.load(mf)
+        return cls(vocab=vocab, merges=merges, special_tokens=special_tokens)
 
     def encode(self, text: str) -> list[int]:
         """
         Encode text to token ids using BPE merges.
         """
-        raise NotImplementedError
+        text = text.replace("\r\n", "\n").replace("\r", "")
+
+        # Pattern for GPT-2 style pretokenization
+        PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+
+        # Split text into segments on special tokens
+        if self.special_tokens:
+             # don't forget () to keep the special tokens as a segment
+            split_pat = "(" + "|".join(re.escape(tok) for tok in self.special_tokens) + ")"
+            segments = re.split(split_pat, text)
+        else:
+            segments = [text]
+
+        ids = []
+        for seg in segments:
+            if not seg:
+                continue
+            if seg in self.special_tokens:
+                ids.append(self.bytes_to_id[seg.encode("utf-8")])
+                continue
+            for match in re.finditer(PAT, seg):
+                token_bytes = match.group(0).encode("utf-8")
+                seq = [bytes([b]) for b in token_bytes]
+
+                while True:
+                    best_i = -1
+                    best_rank = None
+                    for i in range(len(seq) - 1):
+                        r = self.ranks.get((seq[i], seq[i+1]))
+                        if r is not None and (best_rank is None or r < best_rank):
+                            best_rank = r
+                            best_i = i
+                    if best_i == -1:
+                        break
+                    seq[best_i:best_i+2] = [seq[best_i] + seq[best_i+1]]
+                ids.extend(self.bytes_to_id[b] for b in seq)
+
+    def encode_iterable(self, iterable: Iterable[str]) -> Iterator[int]:
+        """
+        Given an iterable of strings (e.g., a Python file handle), return a generator that lazily yields token IDs.
+        This is required for memory-efficient tokenization of large files that we cannot directly load into memory.
+        """
+        for chunk in iterable:
+            for _id in self.encode(chunk):
+                yield _id
 
     def decode(self, ids: list[int]) -> str:
         """
         Decode token ids back to text (UTF-8).
         """
-        data = b"".join(self.id_to_bytes[i] for i in ids)
-        return data.decode("utf-8")
+        data = b"".join(self.vocab[i] for i in ids)
+        return data.decode("utf-8", errors="replace")
 
 
 # Training API expected by tests
