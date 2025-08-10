@@ -91,8 +91,8 @@ class BPETokenizer:
     def __init__(self, vocab: Vocab, merges: list[BytePair], special_tokens: list[str] | None = None):
         self.vocab = vocab
         self.merges = merges
-        self.special_tokens = special_tokens
-        self.bytes_to_id = {b: i for i, b in vocab}
+        self.special_tokens = special_tokens or []
+        self.bytes_to_id = {b: i for i, b in vocab.items()}
         # Ranks: lower index = higher priority during merging
         self.ranks = {pair: i for i, pair in enumerate(merges)}
 
@@ -120,8 +120,9 @@ class BPETokenizer:
 
         # Split text into segments on special tokens
         if self.special_tokens:
-             # don't forget () to keep the special tokens as a segment
-            split_pat = "(" + "|".join(re.escape(tok) for tok in self.special_tokens) + ")"
+            # keep specials as separate segments; prefer longer matches first
+            toks = sorted(self.special_tokens, key=len, reverse=True)
+            split_pat = "(" + "|".join(re.escape(tok) for tok in toks) + ")"
             segments = re.split(split_pat, text)
         else:
             segments = [text]
@@ -130,7 +131,7 @@ class BPETokenizer:
         for seg in segments:
             if not seg:
                 continue
-            if seg in self.special_tokens:
+            if self.special_tokens and seg in self.special_tokens:
                 ids.append(self.bytes_to_id[seg.encode("utf-8")])
                 continue
             for match in re.finditer(PAT, seg):
@@ -149,6 +150,8 @@ class BPETokenizer:
                         break
                     seq[best_i:best_i+2] = [seq[best_i] + seq[best_i+1]]
                 ids.extend(self.bytes_to_id[b] for b in seq)
+
+        return ids
 
     def encode_iterable(self, iterable: Iterable[str]) -> Iterator[int]:
         """
