@@ -1,6 +1,86 @@
 from __future__ import annotations
+
+import os
 from dataclasses import dataclass
-from typing import Iterable, Iterator, BinaryIO
+from collections import Counter, defaultdict
+import multiprocessing as mp
+import regex as re
+from typing import BinaryIO
+
+
+def find_chunk_boundaries(
+    file: BinaryIO,
+    desired_num_chunks: int,
+    split_special_token: bytes,
+) -> list[int]:
+    """
+    Chunk the file into parts that can be counted independently.
+    May return fewer chunks if the boundaries end up overlapping.
+    """
+    assert isinstance(split_special_token, bytes), "Must represent special token as a bytestring"
+
+    # Get total file size in bytes
+    file.seek(0, os.SEEK_END)
+    file_size = file.tell()
+    file.seek(0)
+
+    chunk_size = file_size // desired_num_chunks
+
+    # Initial guesses for chunk boundary locations, uniformly spaced
+    # Chunks start on previous index, don't include last index
+    chunk_boundaries = [i * chunk_size for i in range(desired_num_chunks + 1)]
+    chunk_boundaries[-1] = file_size
+
+    mini_chunk_size = 4096  # Read ahead by 4k bytes at a time
+
+    for bi in range(1, len(chunk_boundaries) - 1):
+        initial_position = chunk_boundaries[bi]
+        file.seek(initial_position)  # Start at boundary guess
+        while True:
+            mini_chunk = file.read(mini_chunk_size)  # Read a mini chunk
+
+            # If EOF, this boundary should be at the end of the file
+            if mini_chunk == b"":
+                chunk_boundaries[bi] = file_size
+                break
+
+            # Find the special token in the mini chunk
+            found_at = mini_chunk.find(split_special_token)
+            if found_at != -1:
+                chunk_boundaries[bi] = initial_position + found_at
+                break
+            initial_position += mini_chunk_size
+
+    # Make sure all boundaries are unique, but might be fewer than desired_num_chunks
+    return sorted(set(chunk_boundaries))
+
+
+def count_chunk(start: int, end: int, path: str, pat: str, specials: list[str]) -> Counter:
+    """Count pre-tokens within a file slice [start, end). Minimal helper for multiprocessing."""
+    counter = Counter()
+    with open(path, "rb") as fh:
+        fh.seek(start)
+        raw = fh.read(end - start)
+    text = raw.decode("utf-8", errors="ignore")
+    # Normalize newlines so Windows CRLF does not introduce stray \r tokens
+    # This ensures reproducible tokenization across platforms
+    text = text.replace("\r\n", "\n").replace("\r", "")
+    specials_set = set(specials)
+    if specials:
+        split_pat = "|".join(re.escape(tok) for tok in specials) # escape special tokens since some have "|" in them
+        segments = re.split(split_pat, text)
+    else:
+        segments = [text]
+    for segment in segments:
+        if not segment:
+            continue
+        for match in re.finditer(pat, segment):
+            token_text = match.group(0)
+            token_bytes = token_text.encode("utf-8")
+            seq = tuple(bytes([b]) for b in token_bytes)
+            counter[seq] += 1
+    return counter
+
 
 BytePair = tuple[bytes, bytes]
 Vocab = dict[int, bytes]
@@ -12,103 +92,140 @@ class BPETokenizer:
     special_tokens: list[str] | None = None
 
     def __post_init__(self):
-        # Derived structures
-        self.bytes_to_id: dict[bytes, int] = {b: i for i, b in self.id_to_bytes.items()}
-        # Rank: lower index = higher priority
-        self.ranks: dict[BytePair, int] = {pair: i for i, pair in enumerate(self.merges)}
-        # Specials in bytes, plus data structure for longest-first matching
-        self.special_bytes: list[bytes] = [s.encode("utf-8") for s in (self.special_tokens or [])]
-        # Optionally build a trie for specials
-        # self._special_trie = ...
+        self.bytes_to_id = {b: i for i, b in self.id_to_bytes.items()}
+        # Ranks: lower index = higher priority during merging
+        self.ranks = {pair: i for i, pair in enumerate(self.merges)}
 
-    # Public API required by tests
 
     def encode(self, text: str) -> list[int]:
         """
-        - Greedy longest-first special token matching (preserve specials).
-        - Convert non-special spans to bytes and run BPE using self.ranks.
+        Encode text to token ids using BPE merges.
         """
-        # 1) split into segments: [(is_special, span_bytes), ...]
-        # segments = self._split_specials(text)
-        # 2) for each segment:
-        #    if special -> [bytes_to_id[special_bytes]]
-        #    else -> self._encode_bytes(span_bytes)
-        raise NotImplementedError
-
-    def encode_iterable(self, iterable: Iterable[str] | Iterable[bytes] | BinaryIO) -> Iterator[int]:
-        """
-        Memory-efficient streaming version:
-        - Iterate line-by-line/chunk-by-chunk, yield ids incrementally.
-        - Must preserve special tokens across chunk boundaries (buffer tail).
-        """
-        # Maintain rolling buffer to avoid splitting specials across boundaries
-        # for chunk in self._chunks(iterable):
-        #     for _id in self._encode_chunk_with_carry(chunk):
-        #         yield _id
         raise NotImplementedError
 
     def decode(self, ids: list[int]) -> str:
         """
-        - Join bytes for all ids in order.
-        - Decode with UTF-8 to Python str.
+        Decode token ids back to text (UTF-8).
         """
-        # data = b"".join(self.id_to_bytes[i] for i in ids)
-        # return data.decode("utf-8")
-        raise NotImplementedError
-
-    # Internal helpers (implement as needed)
-
-    def _split_specials(self, text: str) -> list[tuple[bool, bytes]]:
-        """
-        Return segments as (is_special, bytes). Choose longest matching special first.
-        Overlapping specials must prefer the longer one.
-        """
-        # Implement greedy longest-first scan (e.g., trie or sorted specials by length).
-        raise NotImplementedError
-
-    def _encode_bytes(self, data: bytes) -> list[int]:
-        """
-        Classic BPE:
-        - Start as a list of single-byte tokens (each element is a bytes of length 1).
-        - Repeatedly merge the lowest-rank adjacent pair until no pair exists in ranks.
-        - Map final byte chunks to ids.
-        """
-        # seq: list[bytes] = [bytes([b]) for b in data]
-        # while True:
-        #     pair_positions = self._best_pair_positions(seq)
-        #     if pair_positions is None: break
-        #     seq = self._apply_merge(seq, pair_positions)
-        # return [self.bytes_to_id[s] for s in seq]
-        raise NotImplementedError
-
-    def _best_pair_positions(self, seq: list[bytes]):
-        """
-        Find the adjacent pair with the best (lowest) rank, return its index(es).
-        Efficient implementations use a heap + linked structure; a simple version scans.
-        """
-        raise NotImplementedError
-
-    def _apply_merge(self, seq: list[bytes], pos: int) -> list[bytes]:
-        """
-        Merge seq[pos] and seq[pos+1] into a single bytes element, return new seq.
-        """
-        raise NotImplementedError
+        data = b"".join(self.id_to_bytes[i] for i in ids)
+        return data.decode("utf-8")
 
 
 # Training API expected by tests
 def train_bpe(
-    input_path: str | bytes | os.PathLike,
-    vocab_size: int,
-    special_tokens: list[str],
-    *,
-    min_frequency: int = 2,
-    max_merges: int | None = None,
+    input_path: str | os.PathLike = "data/TinyStoriesV2-GPT4-valid.txt",
+    vocab_size: int = 1000,
+    special_tokens: list[str] = ["<|endoftext|>", "<|startoftext|>"],
 ) -> tuple[Vocab, list[BytePair]]:
     """
     Learn BPE merges from corpus:
     - Initialize vocab with all single bytes (0..255) plus special tokens appended.
-    - Count pair frequencies over corpus (respect specials; treat them as atomic).
-    - Iteratively select most frequent pair, add merge, update counts, stop at vocab_size.
-    - Return (id_to_bytes, merges). ids should be contiguous [0..N-1].
+    - Pretokenize and build word frequency counts.
+    - Repeatedly count adjacent pair frequencies, select the most frequent pair
+      (break ties lexicographically), apply merge, and continue until the
+      requested size is reached.
+    - Return (id_to_bytes, merges).
+    Keep this simple; implement the details yourself.
     """
-    raise NotImplementedError
+    vocab = {i: bytes([i]) for i in range(256)}
+    for token in special_tokens:
+        vocab[len(vocab)] = token.encode("utf-8")
+
+    # Pattern for GPT-2 style pretokenization
+    PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+
+    # Pretokenize and build word frequency counts
+    # Chunked pretokenization (serial), align to the required split token
+    split_token_bytes = b"<|endoftext|>"
+    with open(input_path, "rb") as fbin:
+        cpu = os.cpu_count() or 1
+        num_chunks = max(1, cpu)
+        boundaries = find_chunk_boundaries(fbin, num_chunks, split_token_bytes)
+    spans = list(zip(boundaries[:-1], boundaries[1:]))
+    pretokenized_counter = Counter()
+    if spans:
+        cpu = os.cpu_count() or 1
+        workers = min(len(spans), max(1, cpu))
+        if workers > 1:
+            with mp.Pool(processes=workers) as pool:
+                parts = pool.starmap(count_chunk, [(s, e, input_path, PAT, special_tokens) for s, e in spans])
+            for c in parts:
+                pretokenized_counter.update(c)
+        else:
+            # Single span or single worker fallback
+            for s, e in spans:
+                pretokenized_counter.update(count_chunk(s, e, input_path, PAT, special_tokens))
+
+    pair_counts = Counter()
+    pair_index = defaultdict(set) # pair -> words (token tuples) that contain the pair
+    for word_seq, freq in pretokenized_counter.items():
+        if len(word_seq) < 2:
+            continue
+        for pair in zip(word_seq, word_seq[1:]):
+            pair_counts[pair] += freq
+            pair_index[pair].add(word_seq)
+
+    merges = []
+    while len(vocab) < vocab_size:
+        # pair_counts = Counter()
+        # for word_seq, freq in pretokenized_counter.items():
+        #     if len(word_seq) < 2:
+        #         continue
+        #     for i in range(len(word_seq) - 1):
+        #         pair_counts[(word_seq[i], word_seq[i + 1])] += freq
+
+        if not pair_counts:
+            break
+
+        # Select most frequent pair; break ties by lexicographically greatest pair
+        max_count = max(pair_counts.values())
+        candidates = [pair for pair, cnt in pair_counts.items() if cnt == max_count]
+        best_pair = max(candidates)
+
+        # Record merge and add merged token to vocab
+        merges.append(best_pair)
+        merged_token = best_pair[0] + best_pair[1]
+        vocab[len(vocab)] = merged_token
+
+        # Find all word sequences that contain the best pair
+        affected_words = pair_index.pop(best_pair, set())
+        if not affected_words:
+            continue
+
+        updates = {}
+        for word_seq in affected_words:
+            freq = pretokenized_counter.pop(word_seq, 0)
+            if freq == 0:
+                continue
+            # remove old pair contribution
+            for pair in zip(word_seq, word_seq[1:]):
+                pair_counts[pair] -= freq
+                if pair_counts[pair] <= 0:
+                    pair_counts.pop(pair, None)
+                pair_index[pair].discard(word_seq)
+            # merge occurrences of best_pair in word_seq
+            merged_seq = []
+            i = 0
+            while i < len(word_seq):
+                if i + 1 < len(word_seq) and word_seq[i] == best_pair[0] and word_seq[i + 1] == best_pair[1]:
+                    merged_seq.append(merged_token)
+                    i += 2
+                else:
+                    merged_seq.append(word_seq[i])
+                    i += 1
+            merged_seq = tuple(merged_seq)
+            updates[merged_seq] = updates.get(merged_seq, 0) + freq
+
+        for w_new, freq in updates.items():
+            prev_freq = pretokenized_counter.get(w_new, 0)
+            for pair in zip(w_new, w_new[1:]):
+                pair_counts[pair] += freq
+                pair_index[pair].add(w_new)
+            pretokenized_counter[w_new] = freq + prev_freq
+
+    return vocab, merges
+    
+if __name__ == "__main__":
+    vocab, merges = train_bpe()
+    print(vocab)
+    print(merges)
