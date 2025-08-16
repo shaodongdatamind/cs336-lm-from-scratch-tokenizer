@@ -6,6 +6,9 @@ from collections import Counter, defaultdict
 import multiprocessing as mp
 import regex as re
 from typing import BinaryIO, Iterable, Iterator
+import time
+import pickle
+import psutil
 
 
 def find_chunk_boundaries(
@@ -285,6 +288,64 @@ def train_bpe(
     return vocab, merges
     
 if __name__ == "__main__":
-    vocab, merges = train_bpe()
-    print(vocab)
-    print(merges)
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Train BPE and serialize vocab/merges.")
+    parser.add_argument("--input", dest="input_path", type=str, default=str(os.path.join("data", "TinyStoriesV2-GPT4-train.txt")), help="Path to training text file")
+    parser.add_argument("--vocab-size", dest="vocab_size", type=int, default=10000, help="Target vocab size (including specials)")
+    parser.add_argument(
+        "--special",
+        dest="special_tokens",
+        action="append",
+        default=None,
+        help="Special token to include (may be specified multiple times)",
+    )
+    parser.add_argument("--out-dir", dest="out_dir", type=str, default="data", help="Directory to write serialized outputs")
+    parser.add_argument("--prefix", dest="prefix", type=str, default="tinystories_bpe", help="Filename prefix for outputs")
+    args = parser.parse_args()
+
+    os.makedirs(args.out_dir, exist_ok=True)
+
+    process = psutil.Process(os.getpid())
+    rss_before = process.memory_info().rss
+    start_time = time.time()
+
+    # Default special tokens if none provided
+    specials = args.special_tokens if args.special_tokens is not None else ["<|endoftext|>"]
+    if "<|endoftext|>" not in specials:
+        specials.append("<|endoftext|>")
+
+    vocab, merges = train_bpe(
+        input_path=args.input_path,
+        vocab_size=args.vocab_size,
+        special_tokens=specials,
+    )
+
+    elapsed_s = time.time() - start_time
+    rss_after = process.memory_info().rss
+    peak_bytes = getattr(process.memory_info(), "peak_wset", None)
+
+    vocab_path = os.path.join(args.out_dir, f"{args.prefix}_vocab.pkl")
+    merges_path = os.path.join(args.out_dir, f"{args.prefix}_merges.pkl")
+    with open(vocab_path, "wb") as f:
+        pickle.dump(vocab, f)
+    with open(merges_path, "wb") as f:
+        pickle.dump(merges, f)
+
+    # Compute longest token by byte length
+    longest_token_bytes = max(vocab.values(), key=len)
+    longest_token_len = len(longest_token_bytes)
+    longest_token_text = longest_token_bytes.decode("utf-8", errors="replace")
+
+
+    print("BPE training complete")
+    print(f"Input: {args.input_path}")
+    print(f"Vocab size: {len(vocab)} (target {args.vocab_size}) | Merges learned: {len(merges)}")
+    print(f"Special tokens: {specials}")
+    print(f"Serialized to: {vocab_path} and {merges_path}")
+    print(f"Elapsed: {elapsed_s/3600:.3f} hours ({elapsed_s:.1f} seconds)")
+    print(f"Memory RSS before: {rss_before/1e9:.3f} GB | after: {rss_after/1e9:.3f} GB")
+    if peak_bytes is not None:
+        print(f"Peak working set (Windows): {peak_bytes/1e9:.3f} GB")
+    print(f"Longest token length (bytes): {longest_token_len}")
+    print(f"Longest token (decoded): {longest_token_text!r}")
