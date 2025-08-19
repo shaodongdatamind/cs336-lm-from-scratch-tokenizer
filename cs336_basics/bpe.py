@@ -20,7 +20,9 @@ def find_chunk_boundaries(
     Chunk the file into parts that can be counted independently.
     May return fewer chunks if the boundaries end up overlapping.
     """
-    assert isinstance(split_special_token, bytes), "Must represent special token as a bytestring"
+    assert isinstance(
+        split_special_token, bytes
+    ), "Must represent special token as a bytestring"
 
     # Get total file size in bytes
     file.seek(0, os.SEEK_END)
@@ -58,7 +60,9 @@ def find_chunk_boundaries(
     return sorted(set(chunk_boundaries))
 
 
-def count_chunk(start: int, end: int, path: str, pat: str, specials: list[str]) -> Counter:
+def count_chunk(
+    start: int, end: int, path: str, pat: str, specials: list[str]
+) -> Counter:
     """Count pre-tokens within a file slice [start, end). Minimal helper for multiprocessing."""
     counter = Counter()
     with open(path, "rb") as fh:
@@ -70,7 +74,9 @@ def count_chunk(start: int, end: int, path: str, pat: str, specials: list[str]) 
     text = text.replace("\r\n", "\n").replace("\r", "")
     specials_set = set(specials)
     if specials:
-        split_pat = "|".join(re.escape(tok) for tok in specials) # escape special tokens since some have "|" in them
+        split_pat = "|".join(
+            re.escape(tok) for tok in specials
+        )  # escape special tokens since some have "|" in them
         segments = re.split(split_pat, text)
     else:
         segments = [text]
@@ -88,10 +94,16 @@ def count_chunk(start: int, end: int, path: str, pat: str, specials: list[str]) 
 BytePair = tuple[bytes, bytes]
 Vocab = dict[int, bytes]
 
+
 @dataclass
 class BPETokenizer:
 
-    def __init__(self, vocab: Vocab, merges: list[BytePair], special_tokens: list[str] | None = None):
+    def __init__(
+        self,
+        vocab: Vocab,
+        merges: list[BytePair],
+        special_tokens: list[str] | None = None,
+    ):
         self.vocab = vocab
         self.merges = merges
         self.special_tokens = special_tokens or []
@@ -99,13 +111,16 @@ class BPETokenizer:
         # Ranks: lower index = higher priority during merging
         self.ranks = {pair: i for i, pair in enumerate(merges)}
 
-    def from_files(cls, vocab_filepath: str, merges_filepath: str, special_tokens: list[str]=None):
+    def from_files(
+        cls, vocab_filepath: str, merges_filepath: str, special_tokens: list[str] = None
+    ):
         """
         Class method that constructs and return a Tokenizer from a serialized vocabulary and list of merges
         (in the same format that your BPE training code output) and (optionally) a list of special
         tokens.
         """
         import pickle
+
         with open(vocab_filepath, "rb") as vf:
             vocab: dict[int, bytes] = pickle.load(vf)
         with open(merges_filepath, "rb") as mf:
@@ -145,13 +160,13 @@ class BPETokenizer:
                     best_i = -1
                     best_rank = None
                     for i in range(len(seq) - 1):
-                        r = self.ranks.get((seq[i], seq[i+1]))
+                        r = self.ranks.get((seq[i], seq[i + 1]))
                         if r is not None and (best_rank is None or r < best_rank):
                             best_rank = r
                             best_i = i
                     if best_i == -1:
                         break
-                    seq[best_i:best_i+2] = [seq[best_i] + seq[best_i+1]]
+                    seq[best_i : best_i + 2] = [seq[best_i] + seq[best_i + 1]]
                 ids.extend(self.bytes_to_id[b] for b in seq)
 
         return ids
@@ -210,16 +225,21 @@ def train_bpe(
         workers = min(len(spans), max(1, cpu))
         if workers > 1:
             with mp.Pool(processes=workers) as pool:
-                parts = pool.starmap(count_chunk, [(s, e, input_path, PAT, special_tokens) for s, e in spans])
+                parts = pool.starmap(
+                    count_chunk,
+                    [(s, e, input_path, PAT, special_tokens) for s, e in spans],
+                )
             for c in parts:
                 pretokenized_counter.update(c)
         else:
             # Single span or single worker fallback
             for s, e in spans:
-                pretokenized_counter.update(count_chunk(s, e, input_path, PAT, special_tokens))
+                pretokenized_counter.update(
+                    count_chunk(s, e, input_path, PAT, special_tokens)
+                )
 
     pair_counts = Counter()
-    pair_index = defaultdict(set) # pair -> words (token tuples) that contain the pair
+    pair_index = defaultdict(set)  # pair -> words (token tuples) that contain the pair
     for word_seq, freq in pretokenized_counter.items():
         if len(word_seq) < 2:
             continue
@@ -269,7 +289,11 @@ def train_bpe(
             merged_seq = []
             i = 0
             while i < len(word_seq):
-                if i + 1 < len(word_seq) and word_seq[i] == best_pair[0] and word_seq[i + 1] == best_pair[1]:
+                if (
+                    i + 1 < len(word_seq)
+                    and word_seq[i] == best_pair[0]
+                    and word_seq[i + 1] == best_pair[1]
+                ):
                     merged_seq.append(merged_token)
                     i += 2
                 else:
@@ -286,13 +310,28 @@ def train_bpe(
             pretokenized_counter[w_new] = freq + prev_freq
 
     return vocab, merges
-    
+
+
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="Train BPE and serialize vocab/merges.")
-    parser.add_argument("--input", dest="input_path", type=str, default=str(os.path.join("data", "TinyStoriesV2-GPT4-train.txt")), help="Path to training text file")
-    parser.add_argument("--vocab-size", dest="vocab_size", type=int, default=10000, help="Target vocab size (including specials)")
+    parser = argparse.ArgumentParser(
+        description="Train BPE and serialize vocab/merges."
+    )
+    parser.add_argument(
+        "--input",
+        dest="input_path",
+        type=str,
+        default=str(os.path.join("data", "TinyStoriesV2-GPT4-train.txt")),
+        help="Path to training text file",
+    )
+    parser.add_argument(
+        "--vocab-size",
+        dest="vocab_size",
+        type=int,
+        default=10000,
+        help="Target vocab size (including specials)",
+    )
     parser.add_argument(
         "--special",
         dest="special_tokens",
@@ -300,8 +339,20 @@ if __name__ == "__main__":
         default=None,
         help="Special token to include (may be specified multiple times)",
     )
-    parser.add_argument("--out-dir", dest="out_dir", type=str, default="data", help="Directory to write serialized outputs")
-    parser.add_argument("--prefix", dest="prefix", type=str, default="tinystories_bpe", help="Filename prefix for outputs")
+    parser.add_argument(
+        "--out-dir",
+        dest="out_dir",
+        type=str,
+        default="data",
+        help="Directory to write serialized outputs",
+    )
+    parser.add_argument(
+        "--prefix",
+        dest="prefix",
+        type=str,
+        default="tinystories_bpe",
+        help="Filename prefix for outputs",
+    )
     args = parser.parse_args()
 
     os.makedirs(args.out_dir, exist_ok=True)
@@ -311,7 +362,9 @@ if __name__ == "__main__":
     start_time = time.time()
 
     # Default special tokens if none provided
-    specials = args.special_tokens if args.special_tokens is not None else ["<|endoftext|>"]
+    specials = (
+        args.special_tokens if args.special_tokens is not None else ["<|endoftext|>"]
+    )
     if "<|endoftext|>" not in specials:
         specials.append("<|endoftext|>")
 
@@ -337,10 +390,11 @@ if __name__ == "__main__":
     longest_token_len = len(longest_token_bytes)
     longest_token_text = longest_token_bytes.decode("utf-8", errors="replace")
 
-
     print("BPE training complete")
     print(f"Input: {args.input_path}")
-    print(f"Vocab size: {len(vocab)} (target {args.vocab_size}) | Merges learned: {len(merges)}")
+    print(
+        f"Vocab size: {len(vocab)} (target {args.vocab_size}) | Merges learned: {len(merges)}"
+    )
     print(f"Special tokens: {specials}")
     print(f"Serialized to: {vocab_path} and {merges_path}")
     print(f"Elapsed: {elapsed_s/3600:.3f} hours ({elapsed_s:.1f} seconds)")
