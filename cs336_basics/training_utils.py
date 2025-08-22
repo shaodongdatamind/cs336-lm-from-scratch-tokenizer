@@ -1,4 +1,7 @@
 import torch
+import numpy as np
+import os
+from typing import BinaryIO, IO
 from collections.abc import Callable, Iterable
 from typing import Optional
 import torch
@@ -126,6 +129,7 @@ def cross_entropy(predicted_logits: torch.Tensor, target_indices: torch.Tensor) 
     loss = logsumexp - o_y
     return loss.mean()
 
+
 def cosine_annealing_schedule(t, lr_max, lr_min, Tw, Tc):
     """
     Cosine annealing schedule.
@@ -159,3 +163,71 @@ def gradient_clipping(parameters: Iterable[torch.nn.Parameter], max_l2_norm: flo
         if grad_norm > max_l2_norm:
             clip_coef = max_l2_norm / (grad_norm + 1e-6)
             param.grad = param.grad * clip_coef
+
+
+
+def get_batch(
+    dataset: np.ndarray, batch_size: int, context_length: int, device: str
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Sample language modeling batches from a 1D numpy array of token ids.
+
+    Returns two LongTensors (inputs, targets) of shape (batch_size, context_length)
+    placed on the requested device. Targets are inputs shifted by one token.
+    """
+    if dataset.ndim != 1:
+        raise ValueError("dataset must be a 1D numpy array of token ids")
+    n = dataset.shape[0]
+    if context_length <= 0:
+        raise ValueError("context_length must be positive")
+    if batch_size <= 0:
+        raise ValueError("batch_size must be positive")
+    if n <= context_length:
+        raise ValueError("dataset too short for given context_length")
+
+    # Valid starting indices: [0, n - context_length)
+    starts_t = torch.randint(0, n - context_length, (batch_size,), dtype=torch.long)
+    starts = starts_t.cpu().numpy().astype(np.int64)
+
+    # Vectorized slicing using broadcasting
+    arange_ctx = np.arange(context_length, dtype=np.int64)[None, :]  # (1, m)
+    x_np = dataset[starts[:, None] + arange_ctx]  # (B, m)
+    y_np = dataset[starts[:, None] + arange_ctx + 1]  # (B, m)
+
+    # Move to device as LongTensors (raises on invalid device)
+    x = torch.from_numpy(x_np).to(device=device, dtype=torch.long)
+    y = torch.from_numpy(y_np).to(device=device, dtype=torch.long)
+    return x, y
+
+
+def save_checkpoint(
+    model: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+    iteration: int,
+    out: str | os.PathLike | BinaryIO | IO[bytes]
+) -> None:
+    """
+    Serialize model/optimizer state and iteration to a file path or file-like.
+    """
+    obj = {
+        "model": model.state_dict(),
+        "optimizer": optimizer.state_dict(),
+        "iteration": int(iteration),
+    }
+    torch.save(obj, out)
+
+
+def load_checkpoint(
+    src: str | os.PathLike | BinaryIO | IO[bytes],
+    model: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+) -> int:
+    """
+    Load checkpoint, restore model/optimizer state, and return iteration.
+    """
+    obj = torch.load(src)
+    model.load_state_dict(obj["model"]) 
+    optimizer.load_state_dict(obj["optimizer"]) 
+    return int(obj["iteration"]) 
+
+

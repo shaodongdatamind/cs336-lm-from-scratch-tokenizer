@@ -1,0 +1,12 @@
+uv run python -m cs336_basics.train_transformer_lm \
+  --train_path /path/to/train.npy \
+  --val_path /path/to/val.npy \
+  --vocab_size 50257 \
+  --context_length 256 \
+  --num_layers 8 --d_model 512 --num_heads 8 --d_ff 1365 \
+  --lr 3e-4 --beta1 0.9 --beta2 0.95 --weight_decay 0.01 \
+  --warmup_iters 200 --cosine_cycle_iters 10000 --lr_min 1e-5 \
+  --batch_size 32 --max_iters 20000 --grad_clip 1.0 \
+  --eval_interval 1000 --eval_batches 50 --log_interval 100 \
+  --device cuda:0 \
+  --checkpoint_path ./checkpoint.pt --save_every 2000
