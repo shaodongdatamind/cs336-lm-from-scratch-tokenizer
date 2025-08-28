@@ -83,10 +83,6 @@ class SwiGLU(nn.Module):
         Canonically, d_ff = 8 / 3 * d_model.
         """
         super().__init__()
-        if abs(d_ff - 8 / 3 * d_model) > 1 / 3:
-            logging.warning(
-                f"d_ff = {d_ff}; 8/3 * d_model = {8 / 3 * d_model}. Canonical d_ff is 8/3 * d_model."
-            )
         self.W1 = nn.Parameter(torch.empty(d_ff, d_model, device=device, dtype=dtype))
         self.W2 = nn.Parameter(torch.empty(d_model, d_ff, device=device, dtype=dtype))
         self.W3 = nn.Parameter(torch.empty(d_ff, d_model, device=device, dtype=dtype))
