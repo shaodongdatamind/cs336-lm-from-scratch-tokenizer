@@ -5,7 +5,10 @@ from typing import Optional
 
 import numpy as np
 import torch
+import wandb
+import math
 
+from cs336_basics.bpe import BPETokenizer, tokenize_file_to_npy
 from cs336_basics.basic_building_blocks import TransformerLM
 from cs336_basics.training_utils import (
     AdamW,
@@ -17,6 +20,7 @@ from cs336_basics.training_utils import (
     load_checkpoint,
 )
 
+torch.set_float32_matmul_precision('high')
 
 def _load_token_array(path: str, dtype: str = "uint16") -> np.ndarray:
     """
@@ -66,10 +70,15 @@ def _set_optimizer_lr(optimizer: torch.optim.Optimizer, lr: float) -> None:
 def main():
     parser = argparse.ArgumentParser(description="Train a Transformer LM")
 
-    # Data
-    parser.add_argument("--train_path", type=str, required=True)
-    parser.add_argument("--val_path", type=str, required=False, default=None)
+    # Data (token files)
+    parser.add_argument("--train_tokens", type=str, required=True, help="Path to training tokens (.npy or raw tokens bin)")
+    parser.add_argument("--val_tokens", type=str, required=True, help="Path to validation tokens (.npy or raw tokens bin)")
     parser.add_argument("--data_dtype", type=str, default="uint16", help="dtype for raw binary if not .npy")
+    parser.add_argument("--bpe_vocab", type=str, default=None, help="Path to BPE vocab .pkl (for regeneration)")
+    parser.add_argument("--bpe_merges", type=str, default=None, help="Path to BPE merges .pkl (for regeneration)")
+    parser.add_argument("--train_text", type=str, default=None, help="Optional raw text file to tokenize into --train_tokens")
+    parser.add_argument("--val_text", type=str, default=None, help="Optional raw text file to tokenize into --val_tokens")
+    parser.add_argument("--force_regen", action="store_true", help="Regenerate .npy even if it exists")
 
     # Model
     parser.add_argument("--vocab_size", type=int, required=True)
@@ -100,6 +109,12 @@ def main():
     parser.add_argument("--device", type=str, default="cuda:0" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--seed", type=int, default=42)
 
+    # Weights & Biases
+    parser.add_argument("--wandb", action="store_true", help="Enable W&B logging")
+    parser.add_argument("--wandb_project", type=str, default="lm-from-scratch")
+    parser.add_argument("--wandb_run", type=str, default=None)
+
+
     # Checkpointing
     parser.add_argument("--checkpoint_path", type=str, default=None)
     parser.add_argument("--save_every", type=int, default=0, help="0 disables periodic saves; still saves on exit if path set")
@@ -109,9 +124,39 @@ def main():
 
     torch.manual_seed(args.seed)
 
+    # W&B setup (optional)
+    use_wandb = False
+    if args.wandb:
+        init_kwargs = {"project": args.wandb_project}
+        if args.wandb_run:
+            init_kwargs["name"] = args.wandb_run
+        cfg = vars(args).copy()
+        wandb.init(**init_kwargs, config=cfg)
+        use_wandb = True
+
     # Data
-    train_tokens = _load_token_array(args.train_path, dtype=args.data_dtype)
-    val_tokens = _load_token_array(args.val_path, dtype=args.data_dtype) if args.val_path else None
+    # Optionally regenerate token arrays from raw text using BPE
+    if args.train_text is not None:
+        if args.bpe_vocab is None or args.bpe_merges is None:
+            raise ValueError("--bpe_vocab and --bpe_merges are required when using --train_text")
+        
+        if args.force_regen or (not os.path.exists(args.train_tokens)):
+            os.makedirs(os.path.dirname(args.train_tokens) or ".", exist_ok=True)
+            tok = BPETokenizer.from_files(args.bpe_vocab, args.bpe_merges, ["<|endoftext|>"])
+            print(f"[data] generating tokens: {args.train_text} -> {args.train_tokens}")
+            tokenize_file_to_npy(tok, args.train_text, args.train_tokens, dtype=args.data_dtype)
+
+    if args.val_text is not None and args.val_tokens is not None:
+        if args.bpe_vocab is None or args.bpe_merges is None:
+            raise ValueError("--bpe_vocab and --bpe_merges are required when using --val_text")
+        if args.force_regen or (not os.path.exists(args.val_tokens)):
+            os.makedirs(os.path.dirname(args.val_tokens) or ".", exist_ok=True)
+            tok = BPETokenizer.from_files(args.bpe_vocab, args.bpe_merges, ["<|endoftext|>"])
+            print(f"[data] generating val tokens: {args.val_text} -> {args.val_tokens}")
+            tokenize_file_to_npy(tok, args.val_text, args.val_tokens, dtype=args.data_dtype)
+
+    train_tokens = _load_token_array(args.train_tokens, dtype=args.data_dtype)
+    val_tokens = _load_token_array(args.val_tokens, dtype=args.data_dtype) if args.val_tokens else None
 
     # Model
     device = args.device
@@ -126,6 +171,7 @@ def main():
         device=torch.device(device),
         dtype=None,
     )
+    model = torch.compile(model)
     model.to(device)
 
     # Optimizer
@@ -174,6 +220,12 @@ def main():
             if (it + 1) % args.log_interval == 0:
                 elapsed = time.time() - t0
                 print(f"iter {it+1} | lr {lr_t:.6g} | loss {float(loss.item()):.4f} | {elapsed:.2f}s")
+                if use_wandb:
+                    wandb.log({
+                        "iter": it + 1,
+                        "lr": float(lr_t),
+                        "train_loss": float(loss.item()),
+                    }, step=it + 1)
                 t0 = time.time()
 
             # Eval
@@ -186,7 +238,14 @@ def main():
                     device=device,
                     num_batches=args.eval_batches,
                 )
-                print(f"eval @ iter {it+1}: val_loss {val_loss:.4f}")
+                val_ppl = math.exp(val_loss)
+                print(f"eval @ iter {it+1}: val_loss {val_loss:.4f} | val_ppl {val_ppl:.2f}")
+                if use_wandb:
+                    wandb.log({
+                        "iter": it + 1,
+                        "val_loss": float(val_loss),
+                        "val_ppl": float(val_ppl),
+                    }, step=it + 1)
 
             # Checkpoint
             if args.checkpoint_path and args.save_every and (it + 1) % args.save_every == 0:
@@ -196,6 +255,11 @@ def main():
         # Final checkpoint on exit if path is set
         if args.checkpoint_path is not None:
             save_checkpoint(model, optimizer, min(args.max_iters, it + 1), args.checkpoint_path)
+        if 'use_wandb' in locals() and use_wandb:
+            try:
+                wandb.finish()
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":

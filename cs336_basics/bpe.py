@@ -9,6 +9,7 @@ from typing import BinaryIO, Iterable, Iterator
 import time
 import pickle
 import psutil
+import numpy as np
 
 
 def find_chunk_boundaries(
@@ -111,6 +112,7 @@ class BPETokenizer:
         # Ranks: lower index = higher priority during merging
         self.ranks = {pair: i for i, pair in enumerate(merges)}
 
+    @classmethod
     def from_files(
         cls, vocab_filepath: str, merges_filepath: str, special_tokens: list[str] = None
     ):
@@ -215,13 +217,12 @@ def train_bpe(
     # Chunked pretokenization (serial), align to the required split token
     split_token_bytes = b"<|endoftext|>"
     with open(input_path, "rb") as fbin:
-        cpu = os.cpu_count() or 1
-        num_chunks = max(1, cpu)
+        num_chunks = 100 # max(1, os.cpu_count())
         boundaries = find_chunk_boundaries(fbin, num_chunks, split_token_bytes)
     spans = list(zip(boundaries[:-1], boundaries[1:]))
     pretokenized_counter = Counter()
     if spans:
-        cpu = os.cpu_count() or 1
+        cpu = max(1, os.cpu_count() - 2)
         workers = min(len(spans), max(1, cpu))
         if workers > 1:
             with mp.Pool(processes=workers) as pool:
@@ -310,6 +311,40 @@ def train_bpe(
             pretokenized_counter[w_new] = freq + prev_freq
 
     return vocab, merges
+
+
+def tokenize_file_to_npy(
+    tokenizer: BPETokenizer,
+    input_path: str,
+    output_npy_path: str,
+    dtype: str = "uint16",
+) -> int:
+    """
+    Tokenize a text file using the provided tokenizer and write tokens to a .npy file.
+    Uses a memory-efficient two-pass approach:
+    1) Count tokens
+    2) Write tokens into an open_memmap .npy array
+
+    Returns the number of tokens written.
+    """
+    dt = np.dtype(dtype)
+
+    # Pass 1: count
+    num_tokens = 0
+    with open(input_path, "r", encoding="utf-8", errors="ignore") as f:
+        for _ in tokenizer.encode_iterable(f):
+            num_tokens += 1
+
+    # Pass 2: write to .npy via open_memmap
+    arr = np.lib.format.open_memmap(output_npy_path, mode="w+", dtype=dt, shape=(num_tokens,))
+    i = 0
+    with open(input_path, "r", encoding="utf-8", errors="ignore") as f:
+        for tid in tokenizer.encode_iterable(f):
+            arr[i] = tid
+            i += 1
+    # ensure file is flushed/closed
+    del arr
+    return num_tokens
 
 
 if __name__ == "__main__":
