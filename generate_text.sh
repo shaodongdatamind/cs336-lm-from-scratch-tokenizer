@@ -1,0 +1,15 @@
+uv run python -m cs336_basics.generate_text \
+  --bpe_vocab /home/wangs/Projects/cs336-lm-from-scratch-tokenizer/artifacts/TinyStoriesV2-GPT4_vocab.pkl \
+  --bpe_merges /home/wangs/Projects/cs336-lm-from-scratch-tokenizer/artifacts/TinyStoriesV2-GPT4_merges.pkl \
+  --vocab_size 10000 \
+  --context_length 256 \
+  --num_layers 4 \
+  --d_model 512 \
+  --num_heads 16 \
+  --d_ff 1344 \
+  --checkpoint /home/wangs/Projects/cs336-lm-from-scratch-tokenizer/checkpoints/checkpoint_exp_7_2_64batch.pt \
+  --prompt "Once upon a time" \
+  --max_new_tokens 1000 \
+  --temperature 0 \
+  --top_p 0.5 \
+  --device cuda:0
